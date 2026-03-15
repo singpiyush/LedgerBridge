@@ -53,6 +53,20 @@ management:
     health:
       show-details: when-authorized
 
+springdoc:
+  api-docs:
+    path: /v3/api-docs
+  swagger-ui:
+    path: /swagger-ui.html
+    tags-sorter: alpha
+    operations-sorter: method
+    display-request-duration: true
+    try-it-out-enabled: true
+    filter: true
+    persist-authorization: true
+  show-actuator: false
+  default-produces-media-type: application/json
+
 ledgerbridge:
   jwt:
     secret: ${JWT_SECRET:change-me-in-production-must-be-at-least-256-bits-long-for-hmac-sha}
