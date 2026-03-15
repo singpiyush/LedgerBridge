@@ -1,0 +1,1605 @@
+openapi: 3.1.0
+info:
+  title: LedgerBridge API
+  version: 1.0.0
+  description: |
+    LedgerBridge is a financial data ingestion and normalization platform.
+    It converts unstructured financial communications (emails, PDFs, broker statements)
+    into structured portfolio data.
+
+    ## Authentication
+    All API requests require a Bearer token obtained via API key or OAuth 2.0.
+    Include the token in the `Authorization` header:
+    ```
+    Authorization: Bearer lb_live_xxxxxxxxxxxxxx
+    ```
+
+    ## Environments
+    | Environment | Base URL |
+    |-------------|----------|
+    | Production  | `https://api.ledgerbridge.io/v1` |
+    | Sandbox     | `https://sandbox.ledgerbridge.io/v1` |
+
+    ## Rate Limits
+    | Plan       | Requests/min | Burst |
+    |------------|-------------|-------|
+    | Free       | 60          | 10    |
+    | Growth     | 600         | 50    |
+    | Enterprise | 6000        | 200   |
+
+    Rate limit headers are included in every response:
+    - `X-RateLimit-Limit`
+    - `X-RateLimit-Remaining`
+    - `X-RateLimit-Reset`
+
+    ## Pagination
+    List endpoints return paginated results. Use `cursor` for stable pagination:
+    ```
+    GET /v1/transactions?limit=50&cursor=txn_abc123
+    ```
+
+    ## Idempotency
+    For POST/PUT requests, pass an `Idempotency-Key` header to safely retry requests:
+    ```
+    Idempotency-Key: unique-request-id
+    ```
+
+    ## Webhooks
+    Subscribe to events via the Dashboard or API. All webhook payloads are signed
+    with your webhook secret using HMAC-SHA256 in the `X-LedgerBridge-Signature` header.
+  contact:
+    name: LedgerBridge API Support
+    email: support@ledgerbridge.io
+    url: https://docs.ledgerbridge.io
+  license:
+    name: Proprietary
+  x-logo:
+    url: https://ledgerbridge.io/logo.png
+
+servers:
+  - url: https://api.ledgerbridge.io/v1
+    description: Production
+  - url: https://sandbox.ledgerbridge.io/v1
+    description: Sandbox
+
+security:
+  - BearerAuth: []
+
+tags:
+  - name: Authentication
+    description: API key management and OAuth token exchange
+  - name: Connections
+    description: Link user email accounts and broker logins for data ingestion
+  - name: Ingestion
+    description: Upload documents and trigger email scans
+  - name: Transactions
+    description: Normalized financial transactions
+  - name: Holdings
+    description: Current portfolio holdings
+  - name: Portfolios
+    description: Portfolio summaries and analytics
+  - name: Assets
+    description: Security master data
+  - name: Webhooks
+    description: Event subscriptions and delivery logs
+  - name: Jobs
+    description: Async job status tracking
+
+paths:
+  # ── Authentication ──────────────────────────────────────────────
+  /auth/token:
+    post:
+      operationId: createToken
+      tags: [Authentication]
+      summary: Exchange credentials for an access token
+      description: |
+        Returns a short-lived access token for a connected user.
+        Use this when acting on behalf of an end-user whose email or broker
+        account has been linked via a Connection.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/TokenRequest'
+      responses:
+        '200':
+          description: Token issued
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TokenResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  # ── Connections ─────────────────────────────────────────────────
+  /connections:
+    get:
+      operationId: listConnections
+      tags: [Connections]
+      summary: List all connections for a user
+      parameters:
+        - $ref: '#/components/parameters/UserId'
+        - $ref: '#/components/parameters/Cursor'
+        - $ref: '#/components/parameters/Limit'
+      responses:
+        '200':
+          description: Connections list
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ConnectionList'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+    post:
+      operationId: createConnection
+      tags: [Connections]
+      summary: Create a new email or broker connection
+      description: |
+        Initiates an OAuth flow for email access or stores broker credentials.
+        Returns a `connection_id` and, for OAuth providers, a `redirect_url`
+        the end-user must visit to grant access.
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ConnectionCreate'
+      responses:
+        '201':
+          description: Connection created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Connection'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '422':
+          $ref: '#/components/responses/ValidationError'
+
+  /connections/{connection_id}:
+    get:
+      operationId: getConnection
+      tags: [Connections]
+      summary: Get connection details
+      parameters:
+        - $ref: '#/components/parameters/ConnectionId'
+      responses:
+        '200':
+          description: Connection details
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Connection'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+    delete:
+      operationId: deleteConnection
+      tags: [Connections]
+      summary: Revoke and delete a connection
+      description: |
+        Revokes OAuth tokens, deletes stored credentials, and removes all
+        data ingested through this connection. This action is irreversible.
+      parameters:
+        - $ref: '#/components/parameters/ConnectionId'
+      responses:
+        '204':
+          description: Connection deleted
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  # ── Ingestion ───────────────────────────────────────────────────
+  /ingestion/email-scan:
+    post:
+      operationId: triggerEmailScan
+      tags: [Ingestion]
+      summary: Trigger an email scan for a connection
+      description: |
+        Scans the connected email inbox for financial emails (contract notes,
+        portfolio statements, trade confirmations). Matching emails are queued
+        for parsing. Returns a job that can be polled for status.
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/EmailScanRequest'
+      responses:
+        '202':
+          description: Scan job accepted
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Job'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '422':
+          $ref: '#/components/responses/ValidationError'
+
+  /ingestion/upload:
+    post:
+      operationId: uploadDocument
+      tags: [Ingestion]
+      summary: Upload a document for parsing
+      description: |
+        Upload a PDF, CSV, or image of a broker statement or contract note.
+        The file is queued for parsing and the extracted transactions will
+        appear in the user's transaction list once processing completes.
+
+        Max file size: 20 MB.
+        Supported formats: `application/pdf`, `text/csv`, `image/png`, `image/jpeg`.
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              $ref: '#/components/schemas/DocumentUpload'
+      responses:
+        '202':
+          description: Upload accepted for processing
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/IngestionResult'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '413':
+          description: File too large
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '422':
+          $ref: '#/components/responses/ValidationError'
+
+  /ingestion/{ingestion_id}:
+    get:
+      operationId: getIngestion
+      tags: [Ingestion]
+      summary: Get ingestion status and results
+      parameters:
+        - name: ingestion_id
+          in: path
+          required: true
+          schema:
+            type: string
+            example: ing_a1b2c3d4
+      responses:
+        '200':
+          description: Ingestion details
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/IngestionResult'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /ingestion/{ingestion_id}/review:
+    get:
+      operationId: getIngestionReview
+      tags: [Ingestion]
+      summary: Get parsed transactions pending user confirmation
+      description: |
+        When parser confidence is below the auto-accept threshold, extracted
+        transactions are held for review. This endpoint returns those
+        pending items so the end-user can confirm or correct them.
+      parameters:
+        - name: ingestion_id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Review items
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ReviewItems'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+    post:
+      operationId: submitIngestionReview
+      tags: [Ingestion]
+      summary: Confirm or correct parsed transactions
+      parameters:
+        - name: ingestion_id
+          in: path
+          required: true
+          schema:
+            type: string
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ReviewSubmission'
+      responses:
+        '200':
+          description: Review accepted, portfolio will be recomputed
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Job'
+        '422':
+          $ref: '#/components/responses/ValidationError'
+
+  # ── Transactions ────────────────────────────────────────────────
+  /users/{user_id}/transactions:
+    get:
+      operationId: listTransactions
+      tags: [Transactions]
+      summary: List transactions
+      description: |
+        Returns normalized transactions across all connected brokers.
+        Supports filtering by date range, broker, symbol, and side.
+      parameters:
+        - $ref: '#/components/parameters/UserIdPath'
+        - $ref: '#/components/parameters/Cursor'
+        - $ref: '#/components/parameters/Limit'
+        - name: start_date
+          in: query
+          schema:
+            type: string
+            format: date
+          description: Filter transactions on or after this date (inclusive)
+        - name: end_date
+          in: query
+          schema:
+            type: string
+            format: date
+          description: Filter transactions on or before this date (inclusive)
+        - name: broker
+          in: query
+          schema:
+            type: string
+          description: Filter by broker name (e.g. `zerodha`, `upstox`)
+        - name: symbol
+          in: query
+          schema:
+            type: string
+          description: Filter by asset symbol (e.g. `TCS`, `INFY`)
+        - name: side
+          in: query
+          schema:
+            type: string
+            enum: [buy, sell]
+          description: Filter by trade side
+        - name: sort
+          in: query
+          schema:
+            type: string
+            enum: [date_asc, date_desc]
+            default: date_desc
+      responses:
+        '200':
+          description: Transactions list
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TransactionList'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /users/{user_id}/transactions/{transaction_id}:
+    get:
+      operationId: getTransaction
+      tags: [Transactions]
+      summary: Get a single transaction
+      parameters:
+        - $ref: '#/components/parameters/UserIdPath'
+        - name: transaction_id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Transaction details
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Transaction'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  # ── Holdings ────────────────────────────────────────────────────
+  /users/{user_id}/holdings:
+    get:
+      operationId: listHoldings
+      tags: [Holdings]
+      summary: List current holdings
+      description: |
+        Returns the user's current portfolio holdings with quantities,
+        average cost basis, and broker attribution.
+      parameters:
+        - $ref: '#/components/parameters/UserIdPath'
+        - $ref: '#/components/parameters/Cursor'
+        - $ref: '#/components/parameters/Limit'
+        - name: broker
+          in: query
+          schema:
+            type: string
+        - name: symbol
+          in: query
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Holdings list
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HoldingList'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /users/{user_id}/holdings/{holding_id}:
+    get:
+      operationId: getHolding
+      tags: [Holdings]
+      summary: Get a single holding
+      parameters:
+        - $ref: '#/components/parameters/UserIdPath'
+        - name: holding_id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Holding details
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Holding'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  # ── Portfolios ──────────────────────────────────────────────────
+  /users/{user_id}/portfolio:
+    get:
+      operationId: getPortfolio
+      tags: [Portfolios]
+      summary: Get portfolio summary
+      description: |
+        Returns an aggregated portfolio summary including total invested value,
+        current value, realized and unrealized gains, and sector allocation.
+      parameters:
+        - $ref: '#/components/parameters/UserIdPath'
+      responses:
+        '200':
+          description: Portfolio summary
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PortfolioSummary'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /users/{user_id}/portfolio/performance:
+    get:
+      operationId: getPortfolioPerformance
+      tags: [Portfolios]
+      summary: Get portfolio performance over time
+      parameters:
+        - $ref: '#/components/parameters/UserIdPath'
+        - name: period
+          in: query
+          required: true
+          schema:
+            type: string
+            enum: [1d, 1w, 1m, 3m, 6m, 1y, ytd, all]
+        - name: benchmark
+          in: query
+          schema:
+            type: string
+            example: NIFTY50
+          description: Compare against a benchmark index
+      responses:
+        '200':
+          description: Performance data
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PerformanceData'
+
+  /users/{user_id}/portfolio/gains:
+    get:
+      operationId: getCapitalGains
+      tags: [Portfolios]
+      summary: Get realized and unrealized capital gains
+      description: |
+        Returns a tax-ready breakdown of short-term and long-term capital gains
+        for a given financial year.
+      parameters:
+        - $ref: '#/components/parameters/UserIdPath'
+        - name: financial_year
+          in: query
+          required: true
+          schema:
+            type: string
+            example: "2025-26"
+          description: Indian financial year (e.g. `2025-26`)
+      responses:
+        '200':
+          description: Capital gains report
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CapitalGainsReport'
+
+  # ── Assets ──────────────────────────────────────────────────────
+  /assets:
+    get:
+      operationId: listAssets
+      tags: [Assets]
+      summary: Search the security master
+      parameters:
+        - name: q
+          in: query
+          schema:
+            type: string
+          description: Search by symbol or name
+        - name: exchange
+          in: query
+          schema:
+            type: string
+            example: NSE
+        - name: sector
+          in: query
+          schema:
+            type: string
+        - $ref: '#/components/parameters/Cursor'
+        - $ref: '#/components/parameters/Limit'
+      responses:
+        '200':
+          description: Assets list
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AssetList'
+
+  /assets/{asset_id}:
+    get:
+      operationId: getAsset
+      tags: [Assets]
+      summary: Get asset details
+      parameters:
+        - name: asset_id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Asset details
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Asset'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  # ── Jobs ────────────────────────────────────────────────────────
+  /jobs/{job_id}:
+    get:
+      operationId: getJob
+      tags: [Jobs]
+      summary: Get async job status
+      description: |
+        Poll this endpoint to track the progress of email scans, document
+        parsing, and portfolio recomputation jobs.
+      parameters:
+        - name: job_id
+          in: path
+          required: true
+          schema:
+            type: string
+            example: job_x1y2z3
+      responses:
+        '200':
+          description: Job status
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Job'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  # ── Webhooks ────────────────────────────────────────────────────
+  /webhooks:
+    get:
+      operationId: listWebhooks
+      tags: [Webhooks]
+      summary: List webhook subscriptions
+      parameters:
+        - $ref: '#/components/parameters/Cursor'
+        - $ref: '#/components/parameters/Limit'
+      responses:
+        '200':
+          description: Webhook list
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/WebhookList'
+
+    post:
+      operationId: createWebhook
+      tags: [Webhooks]
+      summary: Create a webhook subscription
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/WebhookCreate'
+      responses:
+        '201':
+          description: Webhook created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Webhook'
+        '422':
+          $ref: '#/components/responses/ValidationError'
+
+  /webhooks/{webhook_id}:
+    get:
+      operationId: getWebhook
+      tags: [Webhooks]
+      summary: Get webhook details
+      parameters:
+        - name: webhook_id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Webhook details
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Webhook'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+    patch:
+      operationId: updateWebhook
+      tags: [Webhooks]
+      summary: Update a webhook subscription
+      parameters:
+        - name: webhook_id
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/WebhookUpdate'
+      responses:
+        '200':
+          description: Webhook updated
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Webhook'
+
+    delete:
+      operationId: deleteWebhook
+      tags: [Webhooks]
+      summary: Delete a webhook subscription
+      parameters:
+        - name: webhook_id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '204':
+          description: Webhook deleted
+
+components:
+  securitySchemes:
+    BearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: |
+        Use your API key directly as a bearer token, or exchange it for
+        a short-lived JWT via `POST /auth/token`.
+
+  parameters:
+    UserId:
+      name: user_id
+      in: query
+      required: true
+      schema:
+        type: string
+        example: usr_k8m2n4
+      description: The user ID to scope the request to
+
+    UserIdPath:
+      name: user_id
+      in: path
+      required: true
+      schema:
+        type: string
+        example: usr_k8m2n4
+
+    ConnectionId:
+      name: connection_id
+      in: path
+      required: true
+      schema:
+        type: string
+        example: conn_a1b2c3
+
+    Cursor:
+      name: cursor
+      in: query
+      schema:
+        type: string
+      description: Pagination cursor from a previous response
+
+    Limit:
+      name: limit
+      in: query
+      schema:
+        type: integer
+        minimum: 1
+        maximum: 100
+        default: 25
+      description: Number of items to return (max 100)
+
+    IdempotencyKey:
+      name: Idempotency-Key
+      in: header
+      schema:
+        type: string
+        example: req_unique_abc123
+      description: Unique key to ensure idempotent request processing
+
+  schemas:
+    # ── Auth ────────────────────────────────────────────────────
+    TokenRequest:
+      type: object
+      required: [grant_type]
+      properties:
+        grant_type:
+          type: string
+          enum: [api_key, authorization_code]
+        api_key:
+          type: string
+          description: Required when `grant_type` is `api_key`
+        code:
+          type: string
+          description: Required when `grant_type` is `authorization_code`
+        redirect_uri:
+          type: string
+          format: uri
+
+    TokenResponse:
+      type: object
+      properties:
+        access_token:
+          type: string
+          example: eyJhbGciOiJSUzI1NiIs...
+        token_type:
+          type: string
+          example: Bearer
+        expires_in:
+          type: integer
+          description: Token lifetime in seconds
+          example: 3600
+        refresh_token:
+          type: string
+        scope:
+          type: string
+          example: read write
+
+    # ── Connections ─────────────────────────────────────────────
+    ConnectionCreate:
+      type: object
+      required: [user_id, provider, type]
+      properties:
+        user_id:
+          type: string
+        provider:
+          type: string
+          enum: [gmail, outlook, zerodha, upstox, groww]
+          description: The email or broker provider
+        type:
+          type: string
+          enum: [email, broker]
+        redirect_uri:
+          type: string
+          format: uri
+          description: OAuth callback URL (required for email connections)
+        credentials:
+          type: object
+          description: Broker-specific credentials (required for broker connections)
+          properties:
+            client_id:
+              type: string
+            api_secret:
+              type: string
+
+    Connection:
+      type: object
+      properties:
+        id:
+          type: string
+          example: conn_a1b2c3
+        user_id:
+          type: string
+        provider:
+          type: string
+        type:
+          type: string
+          enum: [email, broker]
+        status:
+          type: string
+          enum: [pending, active, expired, revoked, error]
+        redirect_url:
+          type: string
+          format: uri
+          description: URL for user to complete OAuth (only for pending email connections)
+        last_synced_at:
+          type: string
+          format: date-time
+          nullable: true
+        created_at:
+          type: string
+          format: date-time
+        error:
+          $ref: '#/components/schemas/ConnectionError'
+          nullable: true
+
+    ConnectionError:
+      type: object
+      properties:
+        code:
+          type: string
+          enum: [token_expired, invalid_credentials, rate_limited, provider_error]
+        message:
+          type: string
+
+    ConnectionList:
+      type: object
+      properties:
+        data:
+          type: array
+          items:
+            $ref: '#/components/schemas/Connection'
+        pagination:
+          $ref: '#/components/schemas/Pagination'
+
+    # ── Ingestion ───────────────────────────────────────────────
+    EmailScanRequest:
+      type: object
+      required: [connection_id]
+      properties:
+        connection_id:
+          type: string
+          example: conn_a1b2c3
+        since:
+          type: string
+          format: date
+          description: Only scan emails received after this date
+        senders:
+          type: array
+          items:
+            type: string
+          description: |
+            Limit scan to specific sender addresses.
+            If omitted, all known financial senders are scanned.
+
+    DocumentUpload:
+      type: object
+      required: [user_id, file, broker]
+      properties:
+        user_id:
+          type: string
+        file:
+          type: string
+          format: binary
+          description: The document file (PDF, CSV, PNG, JPEG)
+        broker:
+          type: string
+          enum: [zerodha, upstox, groww, auto]
+          description: Broker that issued the document. Use `auto` for automatic detection.
+        document_type:
+          type: string
+          enum: [contract_note, holdings_statement, transaction_history, other]
+          default: other
+        document_date:
+          type: string
+          format: date
+          description: Date of the document (used for ordering)
+
+    IngestionResult:
+      type: object
+      properties:
+        id:
+          type: string
+          example: ing_a1b2c3d4
+        user_id:
+          type: string
+        source:
+          type: string
+          enum: [email, upload]
+        status:
+          type: string
+          enum: [queued, processing, review_required, completed, failed]
+        broker:
+          type: string
+          nullable: true
+        document_type:
+          type: string
+          nullable: true
+        transactions_extracted:
+          type: integer
+          description: Number of transactions parsed from the document
+        transactions_confirmed:
+          type: integer
+          description: Number of transactions accepted after review
+        confidence:
+          type: number
+          format: float
+          minimum: 0
+          maximum: 1
+          description: Parser confidence score (1.0 = deterministic, <0.8 = needs review)
+        job_id:
+          type: string
+          description: Associated async job ID
+        created_at:
+          type: string
+          format: date-time
+        completed_at:
+          type: string
+          format: date-time
+          nullable: true
+        error:
+          $ref: '#/components/schemas/IngestionError'
+          nullable: true
+
+    IngestionError:
+      type: object
+      properties:
+        code:
+          type: string
+          enum: [unsupported_format, parse_failure, broker_not_recognized, corrupt_file]
+        message:
+          type: string
+
+    ReviewItems:
+      type: object
+      properties:
+        ingestion_id:
+          type: string
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/ReviewItem'
+
+    ReviewItem:
+      type: object
+      properties:
+        id:
+          type: string
+          example: rev_item_01
+        extracted_transaction:
+          $ref: '#/components/schemas/TransactionData'
+        confidence:
+          type: number
+          format: float
+        alternatives:
+          type: array
+          items:
+            $ref: '#/components/schemas/TransactionData'
+          description: Alternative interpretations the parser considered
+        source_snippet:
+          type: string
+          description: The raw text from the document that produced this extraction
+
+    ReviewSubmission:
+      type: object
+      required: [items]
+      properties:
+        items:
+          type: array
+          items:
+            type: object
+            required: [id, action]
+            properties:
+              id:
+                type: string
+              action:
+                type: string
+                enum: [accept, reject, correct]
+              corrected_transaction:
+                $ref: '#/components/schemas/TransactionData'
+                description: Required when action is `correct`
+
+    # ── Transactions ────────────────────────────────────────────
+    TransactionData:
+      type: object
+      description: Raw transaction fields (used in parsing and review)
+      properties:
+        symbol:
+          type: string
+          example: TCS
+        exchange:
+          type: string
+          example: NSE
+        quantity:
+          type: number
+          example: 5
+        price:
+          type: number
+          format: double
+          example: 3400.00
+        side:
+          type: string
+          enum: [buy, sell]
+        date:
+          type: string
+          format: date
+          example: "2026-03-15"
+        broker:
+          type: string
+          example: zerodha
+
+    Transaction:
+      type: object
+      properties:
+        id:
+          type: string
+          example: txn_m3n4o5
+        user_id:
+          type: string
+        asset:
+          $ref: '#/components/schemas/AssetRef'
+        quantity:
+          type: number
+          example: 5
+        price:
+          type: number
+          format: double
+          example: 3400.00
+        total_value:
+          type: number
+          format: double
+          example: 17000.00
+        side:
+          type: string
+          enum: [buy, sell]
+        date:
+          type: string
+          format: date
+        broker:
+          type: string
+        exchange:
+          type: string
+        ingestion_id:
+          type: string
+          nullable: true
+          description: The ingestion that produced this transaction
+        charges:
+          $ref: '#/components/schemas/TransactionCharges'
+          nullable: true
+        created_at:
+          type: string
+          format: date-time
+
+    TransactionCharges:
+      type: object
+      properties:
+        brokerage:
+          type: number
+          format: double
+        stt:
+          type: number
+          format: double
+          description: Securities Transaction Tax
+        gst:
+          type: number
+          format: double
+        stamp_duty:
+          type: number
+          format: double
+        total:
+          type: number
+          format: double
+
+    TransactionList:
+      type: object
+      properties:
+        data:
+          type: array
+          items:
+            $ref: '#/components/schemas/Transaction'
+        pagination:
+          $ref: '#/components/schemas/Pagination'
+
+    # ── Holdings ────────────────────────────────────────────────
+    Holding:
+      type: object
+      properties:
+        id:
+          type: string
+          example: hld_p6q7r8
+        user_id:
+          type: string
+        asset:
+          $ref: '#/components/schemas/AssetRef'
+        quantity:
+          type: number
+          example: 15
+        avg_price:
+          type: number
+          format: double
+          example: 3350.00
+          description: Weighted average cost basis
+        invested_value:
+          type: number
+          format: double
+          example: 50250.00
+        broker:
+          type: string
+        exchange:
+          type: string
+        first_bought_at:
+          type: string
+          format: date
+        last_updated:
+          type: string
+          format: date-time
+
+    HoldingList:
+      type: object
+      properties:
+        data:
+          type: array
+          items:
+            $ref: '#/components/schemas/Holding'
+        pagination:
+          $ref: '#/components/schemas/Pagination'
+
+    # ── Portfolio ───────────────────────────────────────────────
+    PortfolioSummary:
+      type: object
+      properties:
+        user_id:
+          type: string
+        total_invested:
+          type: number
+          format: double
+          example: 500000.00
+        current_value:
+          type: number
+          format: double
+          example: 575000.00
+          description: Requires market data integration for live values
+        total_gain:
+          type: number
+          format: double
+          example: 75000.00
+        total_gain_pct:
+          type: number
+          format: double
+          example: 15.0
+        realized_gain:
+          type: number
+          format: double
+        unrealized_gain:
+          type: number
+          format: double
+        holdings_count:
+          type: integer
+          example: 12
+        brokers:
+          type: array
+          items:
+            type: string
+          example: [zerodha, upstox]
+        sector_allocation:
+          type: array
+          items:
+            $ref: '#/components/schemas/Allocation'
+        as_of:
+          type: string
+          format: date-time
+          description: Timestamp of last portfolio recomputation
+
+    Allocation:
+      type: object
+      properties:
+        name:
+          type: string
+          example: Information Technology
+        value:
+          type: number
+          format: double
+        percentage:
+          type: number
+          format: double
+
+    PerformanceData:
+      type: object
+      properties:
+        period:
+          type: string
+        data_points:
+          type: array
+          items:
+            type: object
+            properties:
+              date:
+                type: string
+                format: date
+              portfolio_value:
+                type: number
+                format: double
+              benchmark_value:
+                type: number
+                format: double
+                nullable: true
+              daily_return_pct:
+                type: number
+                format: double
+        summary:
+          type: object
+          properties:
+            total_return_pct:
+              type: number
+              format: double
+            benchmark_return_pct:
+              type: number
+              format: double
+              nullable: true
+            alpha:
+              type: number
+              format: double
+              nullable: true
+            max_drawdown_pct:
+              type: number
+              format: double
+
+    CapitalGainsReport:
+      type: object
+      properties:
+        financial_year:
+          type: string
+          example: "2025-26"
+        short_term:
+          $ref: '#/components/schemas/GainBreakdown'
+        long_term:
+          $ref: '#/components/schemas/GainBreakdown'
+        total_realized:
+          type: number
+          format: double
+        transactions:
+          type: array
+          items:
+            $ref: '#/components/schemas/GainTransaction'
+
+    GainBreakdown:
+      type: object
+      properties:
+        gain:
+          type: number
+          format: double
+        loss:
+          type: number
+          format: double
+        net:
+          type: number
+          format: double
+        tax_liability_estimate:
+          type: number
+          format: double
+          description: Estimated tax (for informational purposes only)
+
+    GainTransaction:
+      type: object
+      properties:
+        asset:
+          $ref: '#/components/schemas/AssetRef'
+        buy_date:
+          type: string
+          format: date
+        sell_date:
+          type: string
+          format: date
+        buy_price:
+          type: number
+          format: double
+        sell_price:
+          type: number
+          format: double
+        quantity:
+          type: number
+        gain:
+          type: number
+          format: double
+        type:
+          type: string
+          enum: [short_term, long_term]
+
+    # ── Assets ──────────────────────────────────────────────────
+    Asset:
+      type: object
+      properties:
+        id:
+          type: string
+          example: ast_t1u2v3
+        symbol:
+          type: string
+          example: TCS
+        name:
+          type: string
+          example: Tata Consultancy Services Ltd
+        exchange:
+          type: string
+          example: NSE
+        isin:
+          type: string
+          example: INE467B01029
+        sector:
+          type: string
+          example: Information Technology
+        industry:
+          type: string
+          example: IT Services & Consulting
+        currency:
+          type: string
+          example: INR
+        country:
+          type: string
+          example: IN
+        asset_type:
+          type: string
+          enum: [equity, etf, mutual_fund, bond, commodity]
+
+    AssetRef:
+      type: object
+      description: Lightweight asset reference embedded in other objects
+      properties:
+        id:
+          type: string
+        symbol:
+          type: string
+        name:
+          type: string
+        exchange:
+          type: string
+
+    AssetList:
+      type: object
+      properties:
+        data:
+          type: array
+          items:
+            $ref: '#/components/schemas/Asset'
+        pagination:
+          $ref: '#/components/schemas/Pagination'
+
+    # ── Jobs ────────────────────────────────────────────────────
+    Job:
+      type: object
+      properties:
+        id:
+          type: string
+          example: job_x1y2z3
+        type:
+          type: string
+          enum: [email_scan, document_parse, portfolio_recompute]
+        status:
+          type: string
+          enum: [queued, processing, completed, failed]
+        progress:
+          type: integer
+          minimum: 0
+          maximum: 100
+          description: Completion percentage
+        result:
+          type: object
+          nullable: true
+          description: Job-specific result payload (available when completed)
+          properties:
+            ingestion_id:
+              type: string
+            transactions_count:
+              type: integer
+            errors_count:
+              type: integer
+        created_at:
+          type: string
+          format: date-time
+        completed_at:
+          type: string
+          format: date-time
+          nullable: true
+        error:
+          type: object
+          nullable: true
+          properties:
+            code:
+              type: string
+            message:
+              type: string
+
+    # ── Webhooks ────────────────────────────────────────────────
+    WebhookCreate:
+      type: object
+      required: [url, events]
+      properties:
+        url:
+          type: string
+          format: uri
+          example: https://yourapp.com/webhooks/ledgerbridge
+        events:
+          type: array
+          items:
+            type: string
+            enum:
+              - ingestion.completed
+              - ingestion.failed
+              - ingestion.review_required
+              - transaction.created
+              - holdings.updated
+              - portfolio.recomputed
+              - connection.status_changed
+          minItems: 1
+        secret:
+          type: string
+          description: |
+            If omitted, a secret is generated automatically. Used to sign
+            payloads with HMAC-SHA256.
+
+    WebhookUpdate:
+      type: object
+      properties:
+        url:
+          type: string
+          format: uri
+        events:
+          type: array
+          items:
+            type: string
+        enabled:
+          type: boolean
+
+    Webhook:
+      type: object
+      properties:
+        id:
+          type: string
+          example: whk_d4e5f6
+        url:
+          type: string
+          format: uri
+        events:
+          type: array
+          items:
+            type: string
+        secret:
+          type: string
+          description: Only returned on creation
+        enabled:
+          type: boolean
+        created_at:
+          type: string
+          format: date-time
+
+    WebhookList:
+      type: object
+      properties:
+        data:
+          type: array
+          items:
+            $ref: '#/components/schemas/Webhook'
+        pagination:
+          $ref: '#/components/schemas/Pagination'
+
+    # ── Common ──────────────────────────────────────────────────
+    Pagination:
+      type: object
+      properties:
+        has_more:
+          type: boolean
+        next_cursor:
+          type: string
+          nullable: true
+        total_count:
+          type: integer
+          description: Approximate total (may be omitted for performance)
+
+    Error:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: object
+          required: [type, message]
+          properties:
+            type:
+              type: string
+              enum:
+                - authentication_error
+                - authorization_error
+                - validation_error
+                - not_found
+                - rate_limit_error
+                - conflict
+                - server_error
+            message:
+              type: string
+              example: The requested resource was not found
+            code:
+              type: string
+              description: Machine-readable error code
+              example: resource_not_found
+            param:
+              type: string
+              description: The parameter that caused the error
+              nullable: true
+            request_id:
+              type: string
+              example: req_abc123def456
+
+  responses:
+    Unauthorized:
+      description: Authentication failed
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example:
+            error:
+              type: authentication_error
+              message: Invalid or expired API key
+              request_id: req_abc123
+
+    NotFound:
+      description: Resource not found
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example:
+            error:
+              type: not_found
+              message: The requested resource was not found
+              request_id: req_abc123
+
+    ValidationError:
+      description: Request validation failed
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example:
+            error:
+              type: validation_error
+              message: "broker: must be one of [zerodha, upstox, groww, auto]"
+              param: broker
+              request_id: req_abc123
